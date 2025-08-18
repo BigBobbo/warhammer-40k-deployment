@@ -19,8 +19,14 @@ config/icon="res://icon.svg"
 
 SettingsService="*res://autoloads/SettingsService.gd"
 Measurement="*res://autoloads/Measurement.gd"
+GameState="*res://autoloads/GameState.gd"
+ActionLogger="*res://autoloads/ActionLogger.gd"
+StateSerializer="*res://autoloads/StateSerializer.gd"
+ReplayManager="*res://autoloads/ReplayManager.gd"
+SaveLoadManager="*res://autoloads/SaveLoadManager.gd"
 BoardState="*res://autoloads/BoardState.gd"
 GameManager="*res://autoloads/GameManager.gd"
+PhaseManager="*res://autoloads/PhaseManager.gd"
 TurnManager="*res://autoloads/TurnManager.gd"
 
 [input]

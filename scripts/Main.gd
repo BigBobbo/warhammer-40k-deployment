@@ -154,10 +154,11 @@ func focus_on_player2_zone() -> void:
 
 func refresh_unit_list() -> void:
 	unit_list.clear()
-	var units = BoardState.get_undeployed_units_for_player(BoardState.active_player)
+	var active_player = GameState.get_active_player()
+	var units = GameState.get_undeployed_units_for_player(active_player)
 	
 	for unit_id in units:
-		var unit_data = BoardState.units[unit_id]
+		var unit_data = GameState.get_unit(unit_id)
 		var unit_name = unit_data["meta"]["name"]
 		var model_count = unit_data["models"].size()
 		var display_text = "%s (%d models)" % [unit_name, model_count]
@@ -165,22 +166,24 @@ func refresh_unit_list() -> void:
 		unit_list.set_item_metadata(unit_list.get_item_count() - 1, unit_id)
 
 func update_ui() -> void:
+	var active_player = GameState.get_active_player()
 	var player_text = "Player %d (%s)" % [
-		BoardState.active_player,
-		"Defender" if BoardState.active_player == 1 else "Attacker"
+		active_player,
+		"Defender" if active_player == 1 else "Attacker"
 	]
 	active_player_badge.text = player_text
 	
-	if BoardState.all_units_deployed():
+	if GameState.all_units_deployed():
 		end_deployment_button.disabled = false
 		status_label.text = "All units deployed! Click 'End Deployment' to continue."
 	else:
 		end_deployment_button.disabled = true
 		if deployment_controller.is_placing():
 			var unit_id = deployment_controller.get_current_unit()
-			var unit_name = BoardState.units[unit_id]["meta"]["name"]
+			var unit_data = GameState.get_unit(unit_id)
+			var unit_name = unit_data["meta"]["name"]
 			var placed = deployment_controller.get_placed_count()
-			var total = BoardState.get_model_count(unit_id)
+			var total = unit_data["models"].size()
 			status_label.text = "Placing: %s — %d/%d models" % [unit_name, placed, total]
 		else:
 			status_label.text = "Select a unit to deploy"
@@ -197,7 +200,7 @@ func _on_unit_selected(index: int) -> void:
 	update_ui()
 
 func show_unit_card(unit_id: String) -> void:
-	var unit_data = BoardState.units[unit_id]
+	var unit_data = GameState.get_unit(unit_id)
 	unit_name_label.text = unit_data["meta"]["name"]
 	keywords_label.text = "Keywords: " + ", ".join(unit_data["meta"]["keywords"])
 	
@@ -206,7 +209,9 @@ func show_unit_card(unit_id: String) -> void:
 
 func update_unit_card_buttons() -> void:
 	var placed = deployment_controller.get_placed_count()
-	var total = BoardState.get_model_count(deployment_controller.get_current_unit())
+	var current_unit_id = deployment_controller.get_current_unit()
+	var unit_data = GameState.get_unit(current_unit_id)
+	var total = unit_data["models"].size()
 	
 	models_label.text = "Models: %d/%d" % [placed, total]
 	
@@ -247,7 +252,8 @@ func _on_end_deployment_pressed() -> void:
 
 func update_deployment_zone_visibility() -> void:
 	# Show the active player's zone more prominently
-	if BoardState.active_player == 1:
+	var active_player = GameState.get_active_player()
+	if active_player == 1:
 		p1_zone.modulate = Color(0, 0, 1, 0.6)  # Brighter blue for active
 		p2_zone.modulate = Color(1, 0, 0, 0.3)  # Visible red for inactive
 		p1_zone.visible = true

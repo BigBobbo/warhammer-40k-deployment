@@ -23,9 +23,20 @@ func begin_deploy(_unit_id: String) -> void:
 	unit_id = _unit_id
 	model_idx = 0
 	temp_positions.clear()
-	temp_positions.resize(BoardState.get_model_count(unit_id))
+	var unit_data = GameState.get_unit(unit_id)
+	temp_positions.resize(unit_data["models"].size())
 	
-	BoardState.set_unit_status(unit_id, BoardState.UnitStatus.DEPLOYING)
+	# Update through PhaseManager instead of BoardState
+	if has_node("/root/PhaseManager"):
+		var phase_manager = get_node("/root/PhaseManager")
+		if phase_manager.current_phase_instance:
+			# Set unit status to deploying in GameState
+			phase_manager.apply_state_changes([{
+				"op": "set",
+				"path": "units.%s.status" % unit_id,
+				"value": GameStateData.UnitStatus.DEPLOYING
+			}])
+	
 	_create_ghost()
 
 func is_placing() -> bool:
@@ -48,9 +59,11 @@ func try_place_at(world_pos: Vector2) -> void:
 	if model_idx >= temp_positions.size():
 		return
 	
-	var base_mm = BoardState.get_model_base_mm(unit_id, model_idx)
+	var unit_data = GameState.get_unit(unit_id)
+	var base_mm = unit_data["models"][model_idx]["base_mm"]
 	var radius_px = Measurement.base_radius_px(base_mm)
-	var zone = BoardState.get_deployment_zone_for_player(BoardState.active_player)
+	var active_player = GameState.get_active_player()
+	var zone = BoardState.get_deployment_zone_for_player(active_player)
 	
 	# Check if wholly within deployment zone
 	if not _circle_wholly_in_polygon(world_pos, radius_px, zone):
@@ -76,34 +89,44 @@ func undo() -> void:
 	_clear_previews()
 	temp_positions.fill(null)
 	model_idx = 0
-	BoardState.set_unit_status(unit_id, BoardState.UnitStatus.UNDEPLOYED)
+	
+	# Update through PhaseManager instead of BoardState
+	if has_node("/root/PhaseManager"):
+		var phase_manager = get_node("/root/PhaseManager")
+		if phase_manager.current_phase_instance:
+			phase_manager.apply_state_changes([{
+				"op": "set",
+				"path": "units.%s.status" % unit_id,
+				"value": GameStateData.UnitStatus.UNDEPLOYED
+			}])
+	
 	unit_id = ""
 	_remove_ghost()
 
 func confirm() -> void:
-	var diffs = []
+	# Create deployment action for PhaseManager
+	var model_positions = []
+	for pos in temp_positions:
+		model_positions.append(pos)
 	
-	for i in temp_positions.size():
-		if temp_positions[i] != null:
-			var model_id = BoardState.model_id(unit_id, i)
-			diffs.append({
-				"op": "set",
-				"path": "units.%s.models.%d.pos" % [unit_id, i],
-				"value": [temp_positions[i].x, temp_positions[i].y]
-			})
+	var deployment_action = {
+		"type": "DEPLOY_UNIT",
+		"unit_id": unit_id,
+		"model_positions": model_positions,
+		"phase": GameStateData.Phase.DEPLOYMENT,
+		"player": GameState.get_active_player(),
+		"timestamp": Time.get_unix_time_from_system()
+	}
 	
-	diffs.append({
-		"op": "set",
-		"path": "units.%s.status" % unit_id,
-		"value": BoardState.UnitStatus.DEPLOYED
-	})
-	
-	GameManager.apply_result({
-		"success": true,
-		"phase": "DEPLOYMENT",
-		"diffs": diffs,
-		"log_text": "Deployed %s" % BoardState.units[unit_id]["meta"]["name"]
-	})
+	# Execute through PhaseManager
+	if has_node("/root/PhaseManager"):
+		var phase_manager = get_node("/root/PhaseManager")
+		if phase_manager.current_phase_instance and phase_manager.current_phase_instance.has_method("execute_action"):
+			var result = phase_manager.current_phase_instance.execute_action(deployment_action)
+			if result.success:
+				print("Deployment successful via PhaseManager")
+			else:
+				print("Deployment failed: ", result.get("error", "Unknown error"))
 	
 	_finalize_tokens()
 	_clear_previews()
@@ -115,7 +138,7 @@ func confirm() -> void:
 	
 	emit_signal("unit_confirmed")
 	
-	if BoardState.all_units_deployed():
+	if GameState.all_units_deployed():
 		emit_signal("deployment_complete")
 
 func _create_ghost() -> void:
@@ -125,10 +148,11 @@ func _create_ghost() -> void:
 	ghost_sprite = preload("res://scripts/GhostVisual.gd").new()
 	ghost_sprite.name = "GhostPreview"
 	
-	if model_idx < BoardState.get_model_count(unit_id):
-		var base_mm = BoardState.get_model_base_mm(unit_id, model_idx)
+	var unit_data = GameState.get_unit(unit_id)
+	if model_idx < unit_data["models"].size():
+		var base_mm = unit_data["models"][model_idx]["base_mm"]
 		ghost_sprite.radius = Measurement.base_radius_px(base_mm)
-		ghost_sprite.owner_player = BoardState.get_unit_owner(unit_id)
+		ghost_sprite.owner_player = unit_data["owner"]
 	
 	ghost_layer.add_child(ghost_sprite)
 
@@ -141,8 +165,9 @@ func _update_ghost_for_next_model() -> void:
 	if ghost_sprite == null:
 		return
 	
-	if model_idx < BoardState.get_model_count(unit_id):
-		var base_mm = BoardState.get_model_base_mm(unit_id, model_idx)
+	var unit_data = GameState.get_unit(unit_id)
+	if model_idx < unit_data["models"].size():
+		var base_mm = unit_data["models"][model_idx]["base_mm"]
 		ghost_sprite.radius = Measurement.base_radius_px(base_mm)
 		ghost_sprite.queue_redraw()
 
@@ -156,12 +181,13 @@ func _create_token_visual(unit_id: String, model_index: int, pos: Vector2, is_pr
 	token.position = pos
 	token.name = "Token_%s_%d" % [unit_id, model_index]
 	
-	var base_mm = BoardState.get_model_base_mm(unit_id, model_index)
+	var unit_data = GameState.get_unit(unit_id)
+	var base_mm = unit_data["models"][model_index]["base_mm"]
 	var radius_px = Measurement.base_radius_px(base_mm)
 	
 	var base_circle = preload("res://scripts/TokenVisual.gd").new()
 	base_circle.radius = radius_px
-	base_circle.owner_player = BoardState.get_unit_owner(unit_id)
+	base_circle.owner_player = unit_data["owner"]
 	base_circle.is_preview = is_preview
 	base_circle.model_number = model_index + 1
 	
@@ -257,12 +283,14 @@ func _overlaps_with_existing_models(pos: Vector2, radius: float) -> bool:
 				return true
 	
 	# Check overlap with all deployed models from all units
-	for other_unit_id in BoardState.units:
-		var other_unit = BoardState.units[other_unit_id]
-		if other_unit["status"] == BoardState.UnitStatus.DEPLOYED:
+	var all_units = GameState.state.get("units", {})
+	for other_unit_id in all_units:
+		var other_unit = all_units[other_unit_id]
+		if other_unit["status"] == GameStateData.UnitStatus.DEPLOYED:
 			for model in other_unit["models"]:
-				if model["pos"] != null:
-					var model_pos = Vector2(model["pos"][0], model["pos"][1])
+				var model_position = model.get("position", null)
+				if model_position != null:
+					var model_pos = Vector2(model_position.get("x", 0), model_position.get("y", 0))
 					var distance = pos.distance_to(model_pos)
 					var other_radius = Measurement.base_radius_px(model["base_mm"])
 					if distance < (radius + other_radius):
@@ -273,15 +301,24 @@ func _overlaps_with_existing_models(pos: Vector2, radius: float) -> bool:
 func _show_toast(message: String, color: Color = Color.RED) -> void:
 	print("[%s] %s" % ["WARNING" if color == Color.YELLOW else "ERROR", message])
 
+func _dict_array_to_packed_vector2(dict_array: Array) -> PackedVector2Array:
+	var packed = PackedVector2Array()
+	for dict in dict_array:
+		if dict is Dictionary and dict.has("x") and dict.has("y"):
+			packed.append(Vector2(dict.x, dict.y))
+	return packed
+
 func _process(delta: float) -> void:
 	if ghost_sprite != null and is_placing() and model_idx < temp_positions.size():
 		# Get mouse position in world coordinates
 		var mouse_pos = _get_world_mouse_position()
 		ghost_sprite.position = mouse_pos
 		
-		var base_mm = BoardState.get_model_base_mm(unit_id, model_idx)
+		var unit_data = GameState.get_unit(unit_id)
+		var base_mm = unit_data["models"][model_idx]["base_mm"]
 		var radius_px = Measurement.base_radius_px(base_mm)
-		var zone = BoardState.get_deployment_zone_for_player(BoardState.active_player)
+		var active_player = GameState.get_active_player()
+		var zone = BoardState.get_deployment_zone_for_player(active_player)
 		
 		# Check both deployment zone and model overlap
 		var is_valid = _circle_wholly_in_polygon(mouse_pos, radius_px, zone) and not _overlaps_with_existing_models(mouse_pos, radius_px)

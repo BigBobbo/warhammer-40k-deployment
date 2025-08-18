@@ -1,17 +1,24 @@
 extends Node
 
-enum Phase { DEPLOYMENT, MOVEMENT, SHOOTING, CHARGE, FIGHT, MORALE }
+# BoardState - Legacy compatibility layer and visual data provider
+# Now primarily handles deployment zone visual data for backwards compatibility
+
+# Legacy enum for backwards compatibility
 enum UnitStatus { UNDEPLOYED, DEPLOYING, DEPLOYED }
 
-var phase: Phase = Phase.DEPLOYMENT
-var active_player: int = 1
 var deployment_zones: Array = []
-var units: Dictionary = {}
+
+# Legacy property that forwards to GameState for backwards compatibility
+var active_player: int:
+	get:
+		return GameState.get_active_player()
+	set(value):
+		GameState.set_active_player(value)
 
 func _ready() -> void:
-	initialize_default_data()
+	initialize_deployment_zones()
 
-func initialize_default_data() -> void:
+func initialize_deployment_zones() -> void:
 	deployment_zones = [
 		{
 			"player": 1,
@@ -22,8 +29,9 @@ func initialize_default_data() -> void:
 			"poly": _get_dawn_of_war_zone_2()
 		}
 	]
-	
-	units = {
+
+# Legacy data - these are now maintained for visual components that haven't been updated yet
+var units: Dictionary = {
 		"U_INTERCESSORS_A": {
 			"owner": 1,
 			"status": UnitStatus.UNDEPLOYED,
