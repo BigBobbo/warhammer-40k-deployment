@@ -22,6 +22,8 @@ extends CanvasLayer
 @onready var confirm_button: Button = $HUD_Right/VBoxContainer/UnitCard/ButtonContainer/ConfirmButton
 
 var deployment_controller: Node
+var movement_controller: Node
+var current_phase: GameStateData.Phase
 var view_offset: Vector2 = Vector2.ZERO
 var view_zoom: float = 1.0
 
@@ -35,10 +37,18 @@ func _ready() -> void:
 	
 	board_view.queue_redraw()
 	setup_deployment_zones()
-	setup_deployment_controller()
+	
+	# Setup phase-specific controllers based on current phase
+	current_phase = GameState.get_current_phase()
+	setup_phase_controllers()
+	
 	connect_signals()
 	refresh_unit_list()
 	update_ui()
+	
+	# Enable autosave (saves every 5 minutes)
+	SaveLoadManager.enable_autosave()
+	print("Quick Save/Load enabled: [ key to save, ] key (or F9) to load")
 
 func setup_deployment_zones() -> void:
 	var zone1 = BoardState.get_deployment_zone_for_player(1)
@@ -49,11 +59,70 @@ func setup_deployment_zones() -> void:
 	
 	update_deployment_zone_visibility()
 
+func setup_phase_controllers() -> void:
+	# Clean up existing controllers
+	if deployment_controller:
+		deployment_controller.queue_free()
+		deployment_controller = null
+	if movement_controller:
+		movement_controller.queue_free()
+		movement_controller = null
+	
+	# Setup controller based on current phase
+	match current_phase:
+		GameStateData.Phase.DEPLOYMENT:
+			setup_deployment_controller()
+		GameStateData.Phase.MOVEMENT:
+			setup_movement_controller()
+		_:
+			print("No controller for phase: ", current_phase)
+
 func setup_deployment_controller() -> void:
 	deployment_controller = preload("res://scripts/DeploymentController.gd").new()
 	deployment_controller.name = "DeploymentController"
 	add_child(deployment_controller)
 	deployment_controller.set_layers(token_layer, ghost_layer)
+
+func setup_movement_controller() -> void:
+	print("Setting up MovementController...")
+	movement_controller = preload("res://scripts/MovementController.gd").new()
+	movement_controller.name = "MovementController"
+	add_child(movement_controller)
+	
+	# Get the current phase instance from PhaseManager
+	var phase_instance = PhaseManager.get_current_phase_instance()
+	if phase_instance:
+		print("Phase instance found: ", phase_instance.get_class())
+		
+		# Only set phase and connect signals if it's actually a MovementPhase
+		if phase_instance.has_signal("unit_move_begun"):
+			movement_controller.set_phase(phase_instance)
+			
+			# Connect phase signals to movement controller
+			if not phase_instance.unit_move_begun.is_connected(movement_controller._on_unit_move_begun):
+				phase_instance.unit_move_begun.connect(movement_controller._on_unit_move_begun)
+				print("Connected unit_move_begun signal")
+			if phase_instance.has_signal("model_drop_committed"):
+				if not phase_instance.model_drop_committed.is_connected(movement_controller._on_model_drop_committed):
+					phase_instance.model_drop_committed.connect(movement_controller._on_model_drop_committed)
+					print("Connected model_drop_committed signal")
+			if phase_instance.has_signal("unit_move_confirmed"):
+				if not phase_instance.unit_move_confirmed.is_connected(movement_controller._on_unit_move_confirmed):
+					phase_instance.unit_move_confirmed.connect(movement_controller._on_unit_move_confirmed)
+					print("Connected unit_move_confirmed signal")
+			if phase_instance.has_signal("unit_move_reset"):
+				if not phase_instance.unit_move_reset.is_connected(movement_controller._on_unit_move_reset):
+					phase_instance.unit_move_reset.connect(movement_controller._on_unit_move_reset)
+					print("Connected unit_move_reset signal")
+		else:
+			print("WARNING: Phase instance is not a MovementPhase, skipping signal connections")
+	else:
+		print("WARNING: No phase instance found!")
+	
+	# Connect movement controller signals
+	if not movement_controller.move_action_requested.is_connected(_on_movement_action_requested):
+		movement_controller.move_action_requested.connect(_on_movement_action_requested)
+		print("Connected move_action_requested signal")
 
 func connect_signals() -> void:
 	unit_list.item_selected.connect(_on_unit_selected)
@@ -61,17 +130,55 @@ func connect_signals() -> void:
 	confirm_button.pressed.connect(_on_confirm_pressed)
 	end_deployment_button.pressed.connect(_on_end_deployment_pressed)
 	
+	# Phase management signals
+	PhaseManager.phase_changed.connect(_on_phase_changed)
+	PhaseManager.phase_completed.connect(_on_phase_completed)
+	
 	TurnManager.deployment_side_changed.connect(_on_deployment_side_changed)
 	TurnManager.deployment_phase_complete.connect(_on_deployment_complete)
 	
-	deployment_controller.unit_confirmed.connect(_on_unit_confirmed)
-	deployment_controller.models_placed_changed.connect(_on_models_placed_changed)
+	# Controller signals (if they exist)
+	if deployment_controller:
+		deployment_controller.unit_confirmed.connect(_on_unit_confirmed)
+		deployment_controller.models_placed_changed.connect(_on_models_placed_changed)
+	
+	# Connect save/load signals
+	SaveLoadManager.save_completed.connect(_on_save_completed)
+	SaveLoadManager.load_completed.connect(_on_load_completed)
+	SaveLoadManager.save_failed.connect(_on_save_failed)
+	SaveLoadManager.load_failed.connect(_on_load_failed)
 	
 
 func _input(event: InputEvent) -> void:
+	# Debug: Check for [ key directly for save
+	if event is InputEventKey and event.pressed and event.keycode == KEY_BRACKETLEFT:
+		print("[ KEY DETECTED DIRECTLY!")
+		_perform_quick_save()
+		get_viewport().set_input_as_handled()
+		return
+	
+	# Debug: Check for ] key directly for load
+	if event is InputEventKey and event.pressed and event.keycode == KEY_BRACKETRIGHT:
+		print("] KEY DETECTED DIRECTLY!")
+		_perform_quick_load()
+		get_viewport().set_input_as_handled()
+		return
+	
+	# Handle quick save/load
+	if event.is_action_pressed("quick_save"):
+		print("quick_save action detected!")
+		_perform_quick_save()
+		get_viewport().set_input_as_handled()
+		return
+		
+	if event.is_action_pressed("quick_load"):
+		_perform_quick_load()
+		get_viewport().set_input_as_handled()
+		return
+	
 	# Handle mouse clicks for placement - but only consume if we actually place something
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-		if deployment_controller.is_placing():
+		if deployment_controller and deployment_controller.is_placing():
 			# Check if click is on the board area (not on UI)
 			var ui_rect = get_viewport().get_visible_rect()
 			var right_hud_rect = Rect2(ui_rect.size.x - 400, 0, 400, ui_rect.size.y)  # Right HUD area
@@ -155,15 +262,51 @@ func focus_on_player2_zone() -> void:
 func refresh_unit_list() -> void:
 	unit_list.clear()
 	var active_player = GameState.get_active_player()
-	var units = GameState.get_undeployed_units_for_player(active_player)
 	
-	for unit_id in units:
-		var unit_data = GameState.get_unit(unit_id)
-		var unit_name = unit_data["meta"]["name"]
-		var model_count = unit_data["models"].size()
-		var display_text = "%s (%d models)" % [unit_name, model_count]
-		unit_list.add_item(display_text)
-		unit_list.set_item_metadata(unit_list.get_item_count() - 1, unit_id)
+	# Different list based on current phase
+	match current_phase:
+		GameStateData.Phase.DEPLOYMENT:
+			# Show undeployed units during deployment
+			var units = GameState.get_undeployed_units_for_player(active_player)
+			print("Refreshing unit list for deployment - found ", units.size(), " undeployed units")
+			
+			for unit_id in units:
+				var unit_data = GameState.get_unit(unit_id)
+				var unit_name = unit_data["meta"]["name"]
+				var model_count = unit_data["models"].size()
+				var display_text = "%s (%d models)" % [unit_name, model_count]
+				unit_list.add_item(display_text)
+				unit_list.set_item_metadata(unit_list.get_item_count() - 1, unit_id)
+		
+		GameStateData.Phase.MOVEMENT:
+			# Show deployed units during movement
+			var all_units = GameState.get_units_for_player(active_player)
+			var deployed_count = 0
+			
+			for unit_id in all_units:
+				var unit = all_units[unit_id]
+				if unit.get("status", 0) == GameStateData.UnitStatus.DEPLOYED:
+					var unit_name = unit.get("meta", {}).get("name", unit_id)
+					var model_count = unit.get("models", []).size()
+					var moved = unit.get("flags", {}).get("moved", false)
+					var status = " [MOVED]" if moved else ""
+					var display_text = "%s (%d models)%s" % [unit_name, model_count, status]
+					unit_list.add_item(display_text)
+					unit_list.set_item_metadata(unit_list.get_item_count() - 1, unit_id)
+					deployed_count += 1
+			
+			print("Refreshing unit list for movement - found ", deployed_count, " deployed units")
+		
+		_:
+			# Default behavior for other phases
+			var all_units = GameState.get_units_for_player(active_player)
+			for unit_id in all_units:
+				var unit = all_units[unit_id]
+				var unit_name = unit.get("meta", {}).get("name", unit_id)
+				var model_count = unit.get("models", []).size()
+				var display_text = "%s (%d models)" % [unit_name, model_count]
+				unit_list.add_item(display_text)
+				unit_list.set_item_metadata(unit_list.get_item_count() - 1, unit_id)
 
 func update_ui() -> void:
 	var active_player = GameState.get_active_player()
@@ -173,30 +316,47 @@ func update_ui() -> void:
 	]
 	active_player_badge.text = player_text
 	
-	if GameState.all_units_deployed():
-		end_deployment_button.disabled = false
-		status_label.text = "All units deployed! Click 'End Deployment' to continue."
-	else:
-		end_deployment_button.disabled = true
-		if deployment_controller.is_placing():
-			var unit_id = deployment_controller.get_current_unit()
-			var unit_data = GameState.get_unit(unit_id)
-			var unit_name = unit_data["meta"]["name"]
-			var placed = deployment_controller.get_placed_count()
-			var total = unit_data["models"].size()
-			status_label.text = "Placing: %s — %d/%d models" % [unit_name, placed, total]
-		else:
-			status_label.text = "Select a unit to deploy"
+	# Phase-specific UI updates
+	match current_phase:
+		GameStateData.Phase.DEPLOYMENT:
+			if GameState.all_units_deployed():
+				end_deployment_button.disabled = false
+				status_label.text = "All units deployed! Click 'End Deployment' to continue."
+			else:
+				end_deployment_button.disabled = true
+				if deployment_controller and deployment_controller.is_placing():
+					var unit_id = deployment_controller.get_current_unit()
+					var unit_data = GameState.get_unit(unit_id)
+					var unit_name = unit_data["meta"]["name"]
+					var placed = deployment_controller.get_placed_count()
+					var total = unit_data["models"].size()
+					status_label.text = "Placing: %s — %d/%d models" % [unit_name, placed, total]
+				else:
+					status_label.text = "Select a unit to deploy"
+		
+		GameStateData.Phase.MOVEMENT:
+			status_label.text = "Select a unit to move"
+			end_deployment_button.disabled = false
+		
+		_:
+			status_label.text = "Phase: " + GameStateData.Phase.keys()[current_phase]
+			end_deployment_button.disabled = false
 
 func _on_unit_selected(index: int) -> void:
-	if deployment_controller.is_placing():
+	if deployment_controller and deployment_controller.is_placing():
 		return
 	
 	var unit_id = unit_list.get_item_metadata(index)
-	deployment_controller.begin_deploy(unit_id)
 	
-	show_unit_card(unit_id)
-	unit_list.visible = false
+	# Handle unit selection based on current phase
+	if current_phase == GameStateData.Phase.DEPLOYMENT and deployment_controller:
+		deployment_controller.begin_deploy(unit_id)
+		show_unit_card(unit_id)
+		unit_list.visible = false
+	elif current_phase == GameStateData.Phase.MOVEMENT and movement_controller:
+		# Movement phase unit selection is handled by MovementController
+		pass
+	
 	update_ui()
 
 func show_unit_card(unit_id: String) -> void:
@@ -248,7 +408,295 @@ func _on_deployment_complete() -> void:
 	end_deployment_button.disabled = false
 
 func _on_end_deployment_pressed() -> void:
-	print("Moving to next phase...")
+	# Handle end of current phase
+	match current_phase:
+		GameStateData.Phase.DEPLOYMENT:
+			print("Ending deployment phase...")
+			# Signal phase completion to PhaseManager
+			var phase_instance = PhaseManager.get_current_phase_instance()
+			if phase_instance:
+				phase_instance.emit_signal("phase_completed")
+				
+		GameStateData.Phase.MOVEMENT:
+			print("Ending movement phase...")
+			var phase_instance = PhaseManager.get_current_phase_instance()
+			if phase_instance:
+				phase_instance.emit_signal("phase_completed")
+				
+		_:
+			print("Ending phase: ", current_phase)
+			var phase_instance = PhaseManager.get_current_phase_instance()
+			if phase_instance:
+				phase_instance.emit_signal("phase_completed")
+
+func _perform_quick_save() -> void:
+	print("========================================")
+	print("QUICK SAVE TRIGGERED WITH [ KEY")
+	print("========================================")
+	print("Current game state meta: ", GameState.state.get("meta", {}))
+	
+	# Show immediate UI feedback
+	_show_save_notification("Save debug started...", Color.YELLOW)
+	
+	# Debug: Run save system test
+	_debug_save_system()
+	
+	var success = SaveLoadManager.quick_save()
+	print("========================================")
+	print("QUICK SAVE RESULT: ", success)
+	print("========================================")
+	if success:
+		_show_save_notification("Game saved!", Color.GREEN)
+	else:
+		_show_save_notification("Save failed!", Color.RED)
+
+func _debug_save_system():
+	print("\n=== Quick Save Debug ===")
+	
+	# Check if save directory exists
+	var dir = DirAccess.open("res://")
+	if dir and dir.dir_exists("saves"):
+		print("✅ saves directory exists")
+	else:
+		print("❌ saves directory missing")
+	
+	# Test GameState
+	var snapshot = GameState.create_snapshot()
+	print("GameState snapshot keys: ", snapshot.keys())
+	print("GameState snapshot size: ", snapshot.size())
+	
+	# Test StateSerializer
+	if StateSerializer:
+		var serialized = StateSerializer.serialize_game_state(snapshot)
+		print("Serialized data length: ", serialized.length())
+		if serialized.length() > 0:
+			print("✅ Serialization successful")
+		else:
+			print("❌ Serialization failed")
+	else:
+		print("❌ StateSerializer not available")
+	
+	print("=== Debug Complete ===\n")
+
+func _perform_quick_load() -> void:
+	print("========================================")
+	print("QUICK LOAD TRIGGERED WITH ] KEY")
+	print("========================================")
+	print("Pre-load game state meta: ", GameState.state.get("meta", {}))
+	
+	# Show immediate UI feedback
+	_show_save_notification("Loading...", Color.YELLOW)
+	
+	# Debug: Check if save file exists
+	_debug_load_system()
+	
+	var success = SaveLoadManager.quick_load()
+	print("========================================")
+	print("QUICK LOAD RESULT: ", success)
+	print("Post-load game state meta: ", GameState.state.get("meta", {}))
+	print("========================================")
+	
+	if success:
+		_show_save_notification("Game loaded!", Color.BLUE)
+		
+		# Update current phase
+		current_phase = GameState.get_current_phase()
+		print("Loaded phase: ", GameStateData.Phase.keys()[current_phase])
+		
+		# Sync BoardState with loaded GameState (for visual components)
+		_sync_board_state_with_game_state()
+		
+		# Recreate phase controllers for the loaded phase
+		setup_phase_controllers()
+		
+		# Refresh all UI elements
+		refresh_unit_list()
+		update_ui()
+		update_ui_for_phase()
+		update_deployment_zone_visibility()
+		
+		# Recreate visual tokens for deployed units
+		_recreate_unit_visuals()
+		
+		# Notify PhaseManager of the loaded state
+		if PhaseManager.has_method("transition_to_phase"):
+			PhaseManager.transition_to_phase(current_phase)
+	else:
+		_show_save_notification("Load failed - No save found!", Color.RED)
+
+func _sync_board_state_with_game_state() -> void:
+	# Sync the legacy BoardState with the loaded GameState
+	print("Syncing BoardState with loaded GameState...")
+	
+	var units = GameState.state.get("units", {})
+	print("Loaded units count: ", units.size())
+	
+	# Update BoardState units (for legacy visual components)
+	for unit_id in units:
+		var unit = units[unit_id]
+		if BoardState.units.has(unit_id):
+			# Update existing unit
+			BoardState.units[unit_id]["status"] = unit.get("status", BoardState.UnitStatus.UNDEPLOYED)
+			BoardState.units[unit_id]["models"] = unit.get("models", [])
+			print("Updated BoardState unit: ", unit_id, " status: ", unit.get("status", 0))
+		else:
+			# Add new unit to BoardState
+			BoardState.units[unit_id] = unit
+			print("Added new unit to BoardState: ", unit_id)
+
+func _recreate_unit_visuals() -> void:
+	# Clear existing tokens
+	print("Clearing existing token visuals...")
+	for child in token_layer.get_children():
+		child.queue_free()
+	
+	# Wait a frame for queue_free to process
+	await get_tree().process_frame
+	
+	# Recreate tokens for deployed units
+	var units = GameState.state.get("units", {})
+	var tokens_created = 0
+	
+	print("Recreating token visuals from ", units.size(), " units in GameState...")
+	
+	for unit_id in units:
+		var unit = units[unit_id]
+		print("  Processing unit ", unit_id, " - status: ", unit.get("status", 0))
+		
+		if unit.get("status", 0) == GameStateData.UnitStatus.DEPLOYED:
+			var models = unit.get("models", [])
+			print("    Unit has ", models.size(), " models")
+			
+			for i in range(models.size()):
+				var model = models[i]
+				var pos = model.get("position")
+				var model_id = model.get("id", "m%d" % (i+1))
+				
+				print("      Model ", model_id, " position: ", pos)
+				
+				if pos != null and model.get("alive", true):
+					# Create visual token
+					var token = _create_token_visual(unit_id, model)
+					if token:
+						token_layer.add_child(token)
+						
+						# Set position based on format
+						var final_pos: Vector2
+						if pos is Dictionary:
+							final_pos = Vector2(pos.x, pos.y)
+						else:
+							final_pos = pos
+							
+						token.position = final_pos
+						tokens_created += 1
+						
+						print("        Created token at ", final_pos)
+				else:
+					print("        Skipped model (no position or dead)")
+	
+	print("Recreated ", tokens_created, " unit tokens")
+
+func _create_token_visual(unit_id: String, model: Dictionary) -> Node2D:
+	# Use the existing TokenVisual class
+	var token = preload("res://scripts/TokenVisual.gd").new()
+	
+	# Set properties
+	var unit = GameState.get_unit(unit_id)
+	token.owner_player = unit.get("owner", 1)
+	token.radius = Measurement.base_radius_px(model.get("base_mm", 32))
+	token.is_preview = false
+	
+	# Extract model number from ID (e.g., "m1" -> 1)
+	var model_id = model.get("id", "m1")
+	if model_id.begins_with("m"):
+		token.model_number = model_id.substr(1).to_int()
+	else:
+		token.model_number = 1
+	
+	return token
+
+func _debug_load_system():
+	print("\n=== Quick Load Debug ===")
+	
+	# Check if save file exists
+	var file_path = "res://saves/quicksave.w40ksave"
+	if FileAccess.file_exists(file_path):
+		print("✅ Quicksave file exists at: ", file_path)
+		
+		# Try to read the file
+		var file = FileAccess.open(file_path, FileAccess.READ)
+		if file:
+			var content = file.get_as_text()
+			file.close()
+			print("File size: ", content.length(), " bytes")
+			
+			# Try to parse it
+			var json = JSON.new()
+			var parse_result = json.parse(content)
+			if parse_result == OK:
+				var data = json.data
+				print("✅ JSON parse successful")
+				print("Save contains keys: ", data.keys())
+				if data.has("state"):
+					print("State meta: ", data["state"].get("meta", {}))
+			else:
+				print("❌ JSON parse failed: ", parse_result)
+		else:
+			print("❌ Could not open file for reading")
+	else:
+		print("❌ Quicksave file does not exist")
+	
+	# Check SaveLoadManager state
+	if SaveLoadManager:
+		print("✅ SaveLoadManager exists")
+	else:
+		print("❌ SaveLoadManager not available")
+	
+	print("=== Debug Complete ===\n")
+
+func _show_save_notification(message: String, color: Color) -> void:
+	# Simple notification using the status label temporarily
+	var original_text = status_label.text
+	var original_color = status_label.modulate
+	
+	status_label.text = message
+	status_label.modulate = color
+	
+	# Create a timer to restore original text after 2 seconds
+	var timer = Timer.new()
+	timer.wait_time = 2.0
+	timer.one_shot = true
+	timer.timeout.connect(func():
+		status_label.text = original_text
+		status_label.modulate = original_color
+		timer.queue_free()
+	)
+	add_child(timer)
+	timer.start()
+
+func _on_save_completed(file_path: String, metadata: Dictionary) -> void:
+	print("Save completed: %s" % file_path)
+
+func _on_load_completed(file_path: String, metadata: Dictionary) -> void:
+	print("Load completed: %s" % file_path)
+	# Force UI refresh after loading
+	call_deferred("_refresh_after_load")
+
+func _on_save_failed(error: String) -> void:
+	print("Save failed: %s" % error)
+
+func _on_load_failed(error: String) -> void:
+	print("Load failed: %s" % error)
+
+func _refresh_after_load() -> void:
+	# Completely refresh the UI to match loaded state
+	refresh_unit_list()
+	update_ui()
+	update_deployment_zone_visibility()
+	
+	# Clear any active deployment
+	if deployment_controller and deployment_controller.is_placing():
+		deployment_controller.undo()
 
 func update_deployment_zone_visibility() -> void:
 	# Show the active player's zone more prominently
@@ -275,3 +723,104 @@ func update_deployment_zone_visibility() -> void:
 		if p2_zone.has_method("set_active"):
 			p2_zone.set_active(true)
 			p2_zone.border_color = Color(1, 0.3, 0, 1)
+
+# Phase management handlers
+func _on_phase_changed(new_phase: GameStateData.Phase) -> void:
+	current_phase = new_phase
+	print("Phase changed to: ", GameStateData.Phase.keys()[new_phase])
+	print("Active player: ", GameState.get_active_player())
+	
+	setup_phase_controllers()
+	update_ui_for_phase()
+	
+	# Debug: Check what units are available
+	if current_phase == GameStateData.Phase.MOVEMENT:
+		# Need to wait a frame for the phase to set the active player
+		await get_tree().process_frame
+		var active_player = GameState.get_active_player()
+		var units = GameState.get_units_for_player(active_player)
+		print("Units available for player ", active_player, ":")
+		for unit_id in units:
+			var unit = units[unit_id]
+			print("  - ", unit_id, " (status: ", unit.get("status", 0), ")")
+		
+		# Re-refresh the UI after player change
+		refresh_unit_list()
+		update_ui()
+
+func _on_phase_completed(phase: GameStateData.Phase) -> void:
+	print("Phase completed: ", GameStateData.Phase.keys()[phase])
+
+func update_ui_for_phase() -> void:
+	# Update UI based on current phase
+	match current_phase:
+		GameStateData.Phase.DEPLOYMENT:
+			phase_label.text = "Deployment Phase"
+			end_deployment_button.visible = true
+			end_deployment_button.text = "End Deployment"
+			# Hide deployment zones during other phases
+			p1_zone.visible = true
+			p2_zone.visible = true
+			
+		GameStateData.Phase.MOVEMENT:
+			phase_label.text = "Movement Phase"
+			end_deployment_button.visible = true
+			end_deployment_button.text = "End Movement"
+			# Hide deployment zones during movement
+			p1_zone.visible = false
+			p2_zone.visible = false
+			
+		GameStateData.Phase.SHOOTING:
+			phase_label.text = "Shooting Phase"
+			end_deployment_button.visible = true
+			end_deployment_button.text = "End Shooting"
+			
+		GameStateData.Phase.CHARGE:
+			phase_label.text = "Charge Phase"
+			end_deployment_button.visible = true
+			end_deployment_button.text = "End Charge"
+			
+		GameStateData.Phase.FIGHT:
+			phase_label.text = "Fight Phase"
+			end_deployment_button.visible = true
+			end_deployment_button.text = "End Fight"
+			
+		GameStateData.Phase.MORALE:
+			phase_label.text = "Morale Phase"
+			end_deployment_button.visible = true
+			end_deployment_button.text = "End Morale"
+	
+	refresh_unit_list()
+	update_ui()
+
+func _on_movement_action_requested(action: Dictionary) -> void:
+	print("Main: Received movement action request: ", action.type)
+	
+	# Process movement action through the phase
+	var phase_instance = PhaseManager.get_current_phase_instance()
+	if phase_instance and phase_instance.has_method("execute_action"):
+		print("Main: Executing action through phase")
+		var result = phase_instance.execute_action(action)
+		if result.success:
+			print("Main: Movement action succeeded")
+			# Refresh visuals if needed
+			if action.type == "SET_MODEL_DEST":
+				print("Main: Processing SET_MODEL_DEST - updating visuals for ", action.actor_unit_id, "/", action.payload.model_id)
+				_update_model_visual(action.actor_unit_id, action.payload.model_id, action.payload.dest)
+		else:
+			print("Movement action failed: ", result.get("error", "Unknown error"))
+			if result.has("errors"):
+				for error in result.errors:
+					print("  - ", error)
+	else:
+		print("Main: No phase instance or execute_action method")
+
+func _update_model_visual(unit_id: String, model_id: String, dest: Array) -> void:
+	# Update the visual position of the model
+	print("Updating visual for ", unit_id, "/", model_id, " to ", dest)
+	
+	# Wait a frame for the GameState to fully update
+	await get_tree().process_frame
+	
+	# Recreate all unit visuals with updated positions
+	_recreate_unit_visuals()

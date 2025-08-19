@@ -18,7 +18,7 @@ func initialize_default_state() -> void:
 		"meta": {
 			"game_id": generate_game_id(),
 			"turn_number": 1,
-			"active_player": 1,
+			"active_player": 1,  # Player 1 should start
 			"phase": Phase.DEPLOYMENT,
 			"created_at": Time.get_unix_time_from_system(),
 			"version": "1.0.0"

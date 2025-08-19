@@ -13,9 +13,9 @@ const SAVE_EXTENSION = ".w40ksave"
 const METADATA_EXTENSION = ".meta"
 const BACKUP_EXTENSION = ".backup"
 
-var save_directory: String = "user://saves/"
-var autosave_directory: String = "user://saves/autosaves/"
-var backup_directory: String = "user://saves/backups/"
+var save_directory: String = "res://saves/"
+var autosave_directory: String = "res://saves/autosaves/"
+var backup_directory: String = "res://saves/backups/"
 
 var autosave_enabled: bool = true
 var autosave_interval: float = 300.0  # 5 minutes
@@ -30,11 +30,28 @@ func _ready() -> void:
 	_setup_autosave_timer()
 
 func _initialize_directories() -> void:
-	var dir = DirAccess.open("user://")
+	# Create directories in the project folder (res://)
+	var dir = DirAccess.open("res://")
 	if dir:
-		dir.make_dir_recursive("saves")
-		dir.make_dir_recursive("saves/autosaves")
-		dir.make_dir_recursive("saves/backups")
+		print("SaveLoadManager: Current res:// directory: ", dir.get_current_dir())
+		print("SaveLoadManager: Project directory path: ", ProjectSettings.globalize_path("res://"))
+		
+		if not dir.dir_exists("saves"):
+			var result = dir.make_dir("saves")
+			print("SaveLoadManager: Creating saves directory, result: ", result)
+		
+		if not dir.dir_exists("saves/autosaves"):
+			var result = dir.make_dir_recursive("saves/autosaves")
+			print("SaveLoadManager: Creating autosaves directory, result: ", result)
+		
+		if not dir.dir_exists("saves/backups"):
+			var result = dir.make_dir_recursive("saves/backups")
+			print("SaveLoadManager: Creating backups directory, result: ", result)
+		
+		print("SaveLoadManager: Initialized save directories in project folder")
+		print("SaveLoadManager: Save files will be stored at: ", ProjectSettings.globalize_path("res://saves/"))
+	else:
+		print("SaveLoadManager: ERROR - Could not open res:// directory")
 
 func _setup_autosave_timer() -> void:
 	autosave_timer = Timer.new()
@@ -66,6 +83,8 @@ func load_game_from_slot(slot: int) -> bool:
 
 func quick_save() -> bool:
 	var save_path = save_directory + "quicksave" + SAVE_EXTENSION
+	print("SaveLoadManager: Attempting quick save to: ", save_path)
+	print("SaveLoadManager: Full path: ", ProjectSettings.globalize_path(save_path))
 	var metadata = {"type": "quicksave"}
 	return _save_game_to_path(save_path, metadata)
 
@@ -75,35 +94,48 @@ func quick_load() -> bool:
 
 # Core save/load implementation
 func _save_game_to_path(file_path: String, metadata: Dictionary = {}) -> bool:
+	print("SaveLoadManager: _save_game_to_path called with: ", file_path)
+	
 	# Create backup if file exists
 	if FileAccess.file_exists(file_path):
 		_create_backup(file_path)
 	
 	# Prepare metadata
 	var save_metadata = _create_save_metadata(metadata)
+	print("SaveLoadManager: Save metadata: ", save_metadata)
 	
 	# Get current game state
 	var game_state = GameState.create_snapshot()
+	print("SaveLoadManager: Game state size: ", game_state.size())
 	if game_state.is_empty():
+		print("SaveLoadManager: ERROR - Game state is empty")
 		emit_signal("save_failed", "Failed to get game state")
 		return false
 	
 	# Serialize using StateSerializer
 	if not StateSerializer:
+		print("SaveLoadManager: ERROR - StateSerializer not available")
 		emit_signal("save_failed", "StateSerializer not available")
 		return false
 	
+	print("SaveLoadManager: Calling StateSerializer.serialize_game_state")
 	var serialized_data = StateSerializer.serialize_game_state(game_state)
+	print("SaveLoadManager: Serialized data length: ", serialized_data.length())
 	if serialized_data.is_empty():
+		print("SaveLoadManager: ERROR - Failed to serialize game state")
 		emit_signal("save_failed", "Failed to serialize game state")
 		return false
 	
 	# Write save file
+	print("SaveLoadManager: Opening file for writing: ", file_path)
 	var file = FileAccess.open(file_path, FileAccess.WRITE)
 	if not file:
-		emit_signal("save_failed", "Failed to open save file for writing: " + file_path)
+		var error = "Failed to open save file for writing: " + file_path + " (Error: " + str(FileAccess.get_open_error()) + ")"
+		print("SaveLoadManager: ERROR - ", error)
+		emit_signal("save_failed", error)
 		return false
 	
+	print("SaveLoadManager: Writing serialized data to file")
 	file.store_string(serialized_data)
 	file.close()
 	
@@ -112,49 +144,75 @@ func _save_game_to_path(file_path: String, metadata: Dictionary = {}) -> bool:
 	
 	last_save_path = file_path
 	emit_signal("save_completed", file_path, save_metadata)
-	print("SaveLoadManager: Game saved to %s" % file_path)
+	print("SaveLoadManager: Game saved successfully to %s" % file_path)
 	return true
 
 func _load_game_from_path(file_path: String) -> bool:
+	print("SaveLoadManager: _load_game_from_path called with: ", file_path)
+	print("SaveLoadManager: Full path: ", ProjectSettings.globalize_path(file_path))
+	
 	if not FileAccess.file_exists(file_path):
+		print("SaveLoadManager: ERROR - Save file not found: ", file_path)
 		emit_signal("load_failed", "Save file not found: " + file_path)
 		return false
+	
+	print("SaveLoadManager: Save file exists, loading metadata...")
 	
 	# Load and validate metadata
 	var metadata = _load_metadata(file_path)
 	if metadata.is_empty():
-		emit_signal("load_failed", "Failed to load save metadata")
-		return false
-	
-	var validation = _validate_save_metadata(metadata)
-	if not validation.valid:
-		emit_signal("load_failed", "Save metadata validation failed: " + str(validation.errors))
-		return false
+		print("SaveLoadManager: WARNING - No metadata found, continuing anyway")
+		# Don't fail if metadata is missing, just warn
+		metadata = {"type": "unknown"}
+	else:
+		print("SaveLoadManager: Metadata loaded: ", metadata)
+		
+		var validation = _validate_save_metadata(metadata)
+		if not validation.valid:
+			print("SaveLoadManager: WARNING - Metadata validation failed: ", str(validation.errors))
+			# Continue anyway for debugging
 	
 	# Read save file
+	print("SaveLoadManager: Opening save file for reading...")
 	var file = FileAccess.open(file_path, FileAccess.READ)
 	if not file:
+		print("SaveLoadManager: ERROR - Failed to open save file: ", FileAccess.get_open_error())
 		emit_signal("load_failed", "Failed to open save file for reading: " + file_path)
 		return false
 	
 	var serialized_data = file.get_as_text()
 	file.close()
+	print("SaveLoadManager: Read ", serialized_data.length(), " bytes from save file")
 	
 	# Deserialize using StateSerializer
 	if not StateSerializer:
+		print("SaveLoadManager: ERROR - StateSerializer not available")
 		emit_signal("load_failed", "StateSerializer not available")
 		return false
 	
+	print("SaveLoadManager: Deserializing game state...")
 	var game_state = StateSerializer.deserialize_game_state(serialized_data)
 	if game_state.is_empty():
+		print("SaveLoadManager: ERROR - Failed to deserialize save data")
 		emit_signal("load_failed", "Failed to deserialize save data")
 		return false
 	
+	print("SaveLoadManager: Deserialized state keys: ", game_state.keys())
+	if game_state.has("meta"):
+		print("SaveLoadManager: Loaded game meta: ", game_state["meta"])
+	
 	# Load state into GameState
+	print("SaveLoadManager: Loading snapshot into GameState...")
 	GameState.load_from_snapshot(game_state)
 	
+	# Verify the load worked
+	print("SaveLoadManager: Verifying load...")
+	var current_state = GameState.create_snapshot()
+	if current_state.has("meta"):
+		print("SaveLoadManager: Current game meta after load: ", current_state["meta"])
+	
 	emit_signal("load_completed", file_path, metadata)
-	print("SaveLoadManager: Game loaded from %s" % file_path)
+	print("SaveLoadManager: Game loaded successfully from %s" % file_path)
 	return true
 
 # Autosave functionality

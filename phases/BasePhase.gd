@@ -49,6 +49,10 @@ func execute_action(action: Dictionary) -> Dictionary:
 	
 	var result = process_action(action)
 	if result.success:
+		# Apply the state changes if they exist
+		if result.has("changes") and result.changes is Array:
+			PhaseManager.apply_state_changes(result.changes)
+		
 		# Record the action
 		emit_signal("action_taken", action)
 		

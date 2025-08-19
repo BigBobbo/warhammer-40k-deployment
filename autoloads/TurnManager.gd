@@ -35,58 +35,38 @@ func _on_phase_action_taken(action: Dictionary) -> void:
 	var action_type = action.get("type", "")
 	var current_phase = GameState.get_current_phase()
 	
-	print("TURNMANAGER: Received action ", action_type, " in phase ", current_phase)
-	
 	match current_phase:
 		GameStateData.Phase.DEPLOYMENT:
 			if action_type == "DEPLOY_UNIT":
-				print("TURNMANAGER: Calling check_deployment_alternation")
 				check_deployment_alternation()
-			else:
-				print("TURNMANAGER: Ignoring action type ", action_type)
-		_:
-			print("TURNMANAGER: Ignoring phase ", current_phase)
 
 # Deployment phase management (backwards compatibility)
 func check_deployment_alternation() -> void:
-	print("TURNMANAGER: check_deployment_alternation called")
 	var player1_has_units = _has_undeployed_units(1)
 	var player2_has_units = _has_undeployed_units(2)
 	
-	print("TURNMANAGER: P1 has units: ", player1_has_units, ", P2 has units: ", player2_has_units)
-	
 	if not player1_has_units and not player2_has_units:
 		# All units deployed - phase will complete automatically
-		print("TURNMANAGER: All units deployed")
 		return
 	
 	var current_player = GameState.get_active_player()
-	print("TURNMANAGER: Current player: ", current_player)
 	
 	# Simple alternation - if both players have units, just alternate every time
 	if player1_has_units and player2_has_units:
-		print("TURNMANAGER: Both have units, alternating")
 		alternate_active_player()
 	# If only one player has units left, switch to that player if needed
 	elif player1_has_units and current_player != 1:
-		print("TURNMANAGER: Only P1 has units, switching to P1")
 		_set_active_player(1)
 	elif player2_has_units and current_player != 2:
-		print("TURNMANAGER: Only P2 has units, switching to P2")
 		_set_active_player(2)
-	else:
-		print("TURNMANAGER: No switch needed")
 
 func alternate_active_player() -> void:
 	var current_player = GameState.get_active_player()
 	var new_player = 2 if current_player == 1 else 1
-	print("TURNMANAGER: Alternating from ", current_player, " to ", new_player)
 	_set_active_player(new_player)
 
 func _set_active_player(player: int) -> void:
-	print("TURNMANAGER: Setting active player to ", player)
 	GameState.set_active_player(player)
-	print("TURNMANAGER: Emitting deployment_side_changed signal")
 	emit_signal("deployment_side_changed", player)
 
 func _handle_deployment_phase_start() -> void:
